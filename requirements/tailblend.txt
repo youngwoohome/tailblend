@@ -1,0 +1,6 @@
+# Additional packages for TailBlend prompt generation and result processing.
+# Install vLLM itself from this checkout first with `pip install -e .`.
+datasets
+huggingface_hub
+pandas
+transformers
