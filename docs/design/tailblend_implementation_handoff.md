@@ -159,6 +159,35 @@ ignored by Git.
 Extra Python packages used for prompt construction and result processing.
 Install vLLM itself from this checkout first, then install this file.
 
+## Legacy BoN-TAPER Paths
+
+This repository still contains earlier BoN-TAPER experiment code. These paths
+are kept for comparison and research history, but they are not the main
+TailBlend implementation path.
+
+Legacy files:
+
+- `vllm/v1/core/sched/bon_taper_controller.py`
+- `vllm/v1/core/sched/bon_taper_len_predictor.py`
+- `docs/design/taper_bon_meeting_outline_ko.md`
+
+Legacy policy names that still exist in `scheduler.py`,
+`vllm/envs.py`, and `benchmarks/benchmark_taper_plus.py`:
+
+- `bon_taper`
+- `bon_taper_plus`
+- `bon_taper_len_predictor`
+
+Do not start from these files when implementing or reviewing TailBlend. Start
+from `tail_blend_controller.py` and the `tail_blend` policy instead. The
+BoN-TAPER paths regulate BoN branch admission/planning more directly, while the
+main TailBlend result is about pressure-time preemption victim selection under
+otherwise eager vLLM-BoN execution.
+
+The legacy paths should be removed only on a dedicated cleanup branch after
+checking that benchmark modes, scheduler policy validation, and old experiment
+scripts no longer need them.
+
 ## Runtime Configuration
 
 Minimal TailBlend run:
