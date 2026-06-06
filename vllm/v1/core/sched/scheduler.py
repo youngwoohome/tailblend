@@ -35,6 +35,8 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.sched.bon_taper_controller import BoNTaperController
+from vllm.v1.core.sched.bon_taper_len_predictor import BoNTaperLenPredictor
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -42,14 +44,12 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.core.sched.bon_taper_controller import BoNTaperController
-from vllm.v1.core.sched.bon_taper_len_predictor import BoNTaperLenPredictor
-from vllm.v1.core.sched.tail_blend_controller import TailBlendController
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
     create_request_queue,
 )
+from vllm.v1.core.sched.tail_blend_controller import TailBlendController
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -292,6 +292,8 @@ class Scheduler(SchedulerInterface):
             "full",
             "full_v2",
             "full_slo",
+            "complicated",
+            "simplified",
             "prefill_aware",
             "prefill_aware_gated",
             "adaptive",
@@ -299,33 +301,30 @@ class Scheduler(SchedulerInterface):
             raise ValueError(
                 "VLLM_TAIL_BLEND_PREEMPTION_MODE must be "
                 "'remaining', 'remaining_recompute', 'remaining_parent', "
-                "'full', 'full_v2', 'full_slo', 'prefill_aware', or "
-                "'prefill_aware_gated', or 'adaptive', got "
+                "'full', 'full_v2', 'full_slo', 'complicated', "
+                "'simplified', 'prefill_aware', 'prefill_aware_gated', "
+                "or 'adaptive', got "
                 f"{self.tail_blend_preemption_mode!r}."
             )
         self.tail_blend_reservation_q = max(
             0.0, min(1.0, envs.VLLM_TAIL_BLEND_RESERVATION_Q)
         )
+        self.tail_blend_admission_mode = envs.VLLM_TAIL_BLEND_ADMISSION_MODE
+        if self.tail_blend_admission_mode not in ("off", "ttft_guarded"):
+            raise ValueError(
+                "VLLM_TAIL_BLEND_ADMISSION_MODE must be 'off' or "
+                f"'ttft_guarded', got {self.tail_blend_admission_mode!r}."
+            )
         # Backward-compatible aliases for existing experiment scripts.
         self.eager_tail_blend_pilot_k = self.tail_blend_pilot_k
         self.eager_tail_blend_preemption = self.tail_blend_preemption
-        self.eager_tail_blend_preemption_mode = (
-            self.tail_blend_preemption_mode
-        )
+        self.eager_tail_blend_preemption_mode = self.tail_blend_preemption_mode
         self.eager_tail_blend_reservation_q = self.tail_blend_reservation_q
         self.taper_plus_step_target_ms = envs.VLLM_TAPER_PLUS_STEP_TARGET_MS
-        self.taper_plus_latency_per_seq_ms = (
-            envs.VLLM_TAPER_PLUS_LATENCY_PER_SEQ_MS
-        )
-        self.taper_plus_latency_profile_path = (
-            envs.VLLM_TAPER_PLUS_LATENCY_PROFILE_PATH
-        )
-        self.taper_plus_ttft_slo_s = max(
-            0.0, envs.VLLM_TAPER_PLUS_TTFT_SLO_MS / 1000.0
-        )
-        self.taper_plus_tpot_slo_s = max(
-            0.0, envs.VLLM_TAPER_PLUS_TPOT_SLO_MS / 1000.0
-        )
+        self.taper_plus_latency_per_seq_ms = envs.VLLM_TAPER_PLUS_LATENCY_PER_SEQ_MS
+        self.taper_plus_latency_profile_path = envs.VLLM_TAPER_PLUS_LATENCY_PROFILE_PATH
+        self.taper_plus_ttft_slo_s = max(0.0, envs.VLLM_TAPER_PLUS_TTFT_SLO_MS / 1000.0)
+        self.taper_plus_tpot_slo_s = max(0.0, envs.VLLM_TAPER_PLUS_TPOT_SLO_MS / 1000.0)
         self.taper_plus_rho = max(0.0, min(1.0, envs.VLLM_TAPER_PLUS_RHO))
         self.taper_plus_utility = envs.VLLM_TAPER_PLUS_UTILITY
         if self.taper_plus_utility not in ("linear", "concave"):
@@ -333,24 +332,18 @@ class Scheduler(SchedulerInterface):
                 "VLLM_TAPER_PLUS_UTILITY must be 'linear' or 'concave', "
                 f"got {self.taper_plus_utility!r}."
             )
-        self.taper_plus_online_calibration = (
-            envs.VLLM_TAPER_PLUS_ONLINE_CALIBRATION
-        )
+        self.taper_plus_online_calibration = envs.VLLM_TAPER_PLUS_ONLINE_CALIBRATION
         self.taper_plus_record_latency_samples = (
             envs.VLLM_TAPER_PLUS_RECORD_LATENCY_SAMPLES
         )
         self.taper_plus_calibration_alpha = max(
             0.0, min(1.0, envs.VLLM_TAPER_PLUS_CALIBRATION_ALPHA)
         )
-        self.taper_plus_safety_factor = max(
-            1.0, envs.VLLM_TAPER_PLUS_SAFETY_FACTOR
-        )
+        self.taper_plus_safety_factor = max(1.0, envs.VLLM_TAPER_PLUS_SAFETY_FACTOR)
         self.taper_plus_eager_when_unpressured = (
             envs.VLLM_TAPER_PLUS_EAGER_WHEN_UNPRESSURED
         )
-        self.taper_plus_branch_overdue_boost = (
-            envs.VLLM_TAPER_PLUS_BRANCH_OVERDUE_BOOST
-        )
+        self.taper_plus_branch_overdue_boost = envs.VLLM_TAPER_PLUS_BRANCH_OVERDUE_BOOST
         self.taper_plus_log_step_stats = envs.VLLM_TAPER_PLUS_LOG_STEP_STATS
         self.taper_plus_latency_base_ms = 0.0
         self.taper_plus_latency_width_ms = max(
@@ -477,7 +470,10 @@ class Scheduler(SchedulerInterface):
             profile = profile["coefficients"]
 
         base_ms = self._get_float_profile_value(
-            profile, "base_ms", "latency_base_ms", default=self.taper_plus_latency_base_ms
+            profile,
+            "base_ms",
+            "latency_base_ms",
+            default=self.taper_plus_latency_base_ms,
         )
         width_ms = self._get_float_profile_value(
             profile,
@@ -569,19 +565,13 @@ class Scheduler(SchedulerInterface):
         normalizer = 1.0 + decode_width**2 + context_k**2
 
         self.taper_plus_latency_base_ms += alpha * error_ms / normalizer
-        self.taper_plus_latency_width_ms += (
-            alpha * error_ms * decode_width / normalizer
-        )
+        self.taper_plus_latency_width_ms += alpha * error_ms * decode_width / normalizer
         self.taper_plus_latency_context_ms_per_1k += (
             alpha * error_ms * context_k / normalizer
         )
 
-        self.taper_plus_latency_base_ms = max(
-            0.0, self.taper_plus_latency_base_ms
-        )
-        self.taper_plus_latency_width_ms = max(
-            0.001, self.taper_plus_latency_width_ms
-        )
+        self.taper_plus_latency_base_ms = max(0.0, self.taper_plus_latency_base_ms)
+        self.taper_plus_latency_width_ms = max(0.001, self.taper_plus_latency_width_ms)
         self.taper_plus_latency_context_ms_per_1k = max(
             0.0, self.taper_plus_latency_context_ms_per_1k
         )
@@ -608,13 +598,15 @@ class Scheduler(SchedulerInterface):
             and observed_ms > self.taper_plus_step_target_ms * 20
         ):
             return
-        self.taper_plus_latency_samples.append({
-            "observed_ms": observed_ms,
-            "predicted_ms": predicted_ms,
-            "decode_width": float(decode_width),
-            "context_tokens": float(context_tokens),
-            "context_k": context_tokens / 1000.0,
-        })
+        self.taper_plus_latency_samples.append(
+            {
+                "observed_ms": observed_ms,
+                "predicted_ms": predicted_ms,
+                "decode_width": float(decode_width),
+                "context_tokens": float(context_tokens),
+                "context_k": context_tokens / 1000.0,
+            }
+        )
 
     def _get_taper_plus_deadline_s(self, request: Request) -> float:
         """Return the paper-style next-token deadline for a request."""
@@ -622,9 +614,7 @@ class Scheduler(SchedulerInterface):
             return request.arrival_time + self.taper_plus_ttft_slo_s
         return request.taper_last_token_time + self.taper_plus_tpot_slo_s
 
-    def _get_taper_plus_group_deadline_s(
-        self, requests: list[Request]
-    ) -> float:
+    def _get_taper_plus_group_deadline_s(self, requests: list[Request]) -> float:
         """Return the next-token deadline for one logical BoN parent.
 
         TAPER's Algorithm 1 reasons over logical requests, not over each
@@ -636,11 +626,14 @@ class Scheduler(SchedulerInterface):
             return min(request.arrival_time for request in requests) + (
                 self.taper_plus_ttft_slo_s
             )
-        return max(
-            request.taper_last_token_time
-            for request in requests
-            if request.num_output_tokens > 0
-        ) + self.taper_plus_tpot_slo_s
+        return (
+            max(
+                request.taper_last_token_time
+                for request in requests
+                if request.num_output_tokens > 0
+            )
+            + self.taper_plus_tpot_slo_s
+        )
 
     def _get_taper_plus_branch_overdue_ms(
         self, request: Request, now_s: float
@@ -666,7 +659,7 @@ class Scheduler(SchedulerInterface):
         if not self.enable_taper_plus or token_budget <= 0:
             return None
         if self.taper_plus_policy == "tail_blend":
-            return self.tail_blend_controller.plan_admitted_req_ids(
+            return self.tail_blend_controller.plan_admitted_running_req_ids(
                 token_budget
             )
         if self.taper_plus_policy in (
@@ -703,10 +696,7 @@ class Scheduler(SchedulerInterface):
             if is_decode_candidate:
                 all_decode_groups.add(group_id)
 
-            if (
-                group_id not in regulated_groups
-                or not is_decode_candidate
-            ):
+            if group_id not in regulated_groups or not is_decode_candidate:
                 admitted_req_ids.add(request.request_id)
                 if is_decode_candidate:
                     active_decode_width += 1
@@ -758,9 +748,7 @@ class Scheduler(SchedulerInterface):
         group_slack_ms = {
             group_id: max(
                 0.0,
-                self._get_taper_plus_group_deadline_s(
-                    group_to_candidates[group_id]
-                )
+                self._get_taper_plus_group_deadline_s(group_to_candidates[group_id])
                 - now_s,
             )
             * 1000.0
@@ -801,8 +789,7 @@ class Scheduler(SchedulerInterface):
                 # this parent's own slack so loose groups can widen naturally.
                 group_budget_ms = baseline_step_ms + self.taper_plus_rho * max(
                     0.0,
-                    group_slack_ms.get(group_id, min_slack_ms)
-                    - baseline_step_ms,
+                    group_slack_ms.get(group_id, min_slack_ms) - baseline_step_ms,
                 )
                 branch_overdue_ms = (
                     self._get_taper_plus_branch_overdue_ms(request, now_s)
@@ -815,15 +802,13 @@ class Scheduler(SchedulerInterface):
                     # not advanced for many TPOT windows. Let overdue siblings
                     # compete for admission instead of marking the group
                     # infeasible on the global budget alone.
-                    candidate_budget_ms = max(
-                        candidate_budget_ms, predicted_step_ms
-                    )
+                    candidate_budget_ms = max(candidate_budget_ms, predicted_step_ms)
                 if predicted_step_ms > candidate_budget_ms:
                     continue
 
                 if use_taper_plus_memory_gate:
-                    future_footprint = (
-                        self.kv_cache_manager.estimate_future_footprint(request)
+                    future_footprint = self.kv_cache_manager.estimate_future_footprint(
+                        request
                     )
                     under_memory_pressure = virtual_free_blocks < memory_threshold
                     over_future_budget = virtual_free_blocks < future_footprint
@@ -833,9 +818,7 @@ class Scheduler(SchedulerInterface):
                         infeasible_groups.add(group_id)
                         continue
 
-                du = self._taper_plus_marginal_utility(
-                    granted_by_group[group_id]
-                )
+                du = self._taper_plus_marginal_utility(granted_by_group[group_id])
                 if branch_overdue_ms > 0.0:
                     du *= 1.0 + branch_overdue_ms / max(
                         1.0, self.taper_plus_tpot_slo_s * 1000.0
@@ -875,18 +858,12 @@ class Scheduler(SchedulerInterface):
         group_to_candidates: dict[str, list[Request]] = defaultdict(list)
         for request in self.running:
             if self._is_taper_plus_decode_candidate(request):
-                group_to_candidates[self._taper_plus_group_id(request)].append(
-                    request
-                )
+                group_to_candidates[self._taper_plus_group_id(request)].append(request)
 
         regulated_groups = [
-            requests
-            for requests in group_to_candidates.values()
-            if len(requests) > 1
+            requests for requests in group_to_candidates.values() if len(requests) > 1
         ]
-        total_regulated_branches = sum(
-            len(requests) for requests in regulated_groups
-        )
+        total_regulated_branches = sum(len(requests) for requests in regulated_groups)
         if admitted_req_ids is None:
             admitted_regulated_branches = total_regulated_branches
         else:
@@ -1055,10 +1032,8 @@ class Scheduler(SchedulerInterface):
 
                     # The request cannot be scheduled. Preempt one running
                     # request to make room.
-                    preempted_req = (
-                        self.tail_blend_controller.select_preemption_victim(
-                            request
-                        )
+                    preempted_req = self.tail_blend_controller.select_preemption_victim(
+                        request
                     )
                     used_predictor_preemption = preempted_req is not None
                     if preempted_req is None:
@@ -1079,9 +1054,7 @@ class Scheduler(SchedulerInterface):
                     if preempted_req in scheduled_running_reqs:
                         preempted_req_id = preempted_req.request_id
                         scheduled_running_reqs.remove(preempted_req)
-                        token_budget += num_scheduled_tokens.pop(
-                            preempted_req_id
-                        )
+                        token_budget += num_scheduled_tokens.pop(preempted_req_id)
                         req_to_new_blocks.pop(preempted_req_id)
                         scheduled_spec_decode_tokens.pop(preempted_req_id, None)
                         preempted_encoder_inputs = scheduled_encoder_inputs.pop(
@@ -1171,13 +1144,18 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
+                defer_for_tail_blend = (
+                    self.taper_plus_policy == "tail_blend"
+                    and (
+                        self.tail_blend_pilot_k > 0
+                        or self.tail_blend_reservation_q > 0.0
+                        or self.tail_blend_admission_mode != "off"
+                    )
+                    and self.tail_blend_controller.should_defer_waiting_request(request)
+                )
                 if (
-                    self.tail_blend_controller.should_defer_waiting_request(
-                        request
-                    )
-                    or self.bon_taper_controller.should_defer_waiting_request(
-                        request
-                    )
+                    defer_for_tail_blend
+                    or self.bon_taper_controller.should_defer_waiting_request(request)
                 ):
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
@@ -1527,7 +1505,7 @@ class Scheduler(SchedulerInterface):
         taper_plus_prefill_tokens = 0
         taper_plus_predicted_step_ms = 0.0
         taper_plus_step_start_s = 0.0
-        if self.enable_taper_plus:
+        if self.enable_taper_plus and self.taper_plus_policy != "tail_blend":
             (
                 taper_plus_decode_width,
                 taper_plus_context_tokens,

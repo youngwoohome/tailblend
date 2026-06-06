@@ -37,9 +37,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from vllm.engine.arg_utils import EngineArgs
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-
+from vllm.engine.arg_utils import EngineArgs  # noqa: E402
+from vllm.utils.argparse_utils import FlexibleArgumentParser  # noqa: E402
 
 logger = logging.getLogger("benchmark_taper_plus")
 
@@ -109,11 +108,35 @@ class RequestTrace:
             return 0.0
         return max(self.logical_inter_token_latencies_s)
 
+    @staticmethod
+    def _percentile(values: list[float], pct: float) -> float:
+        if not values:
+            return 0.0
+        sorted_values = sorted(values)
+        if len(sorted_values) == 1:
+            return sorted_values[0]
+        rank = (len(sorted_values) - 1) * pct / 100.0
+        lower = math.floor(rank)
+        upper = math.ceil(rank)
+        if lower == upper:
+            return sorted_values[int(rank)]
+        lower_value = sorted_values[lower]
+        upper_value = sorted_values[upper]
+        return lower_value + (upper_value - lower_value) * (rank - lower)
+
     @property
     def mean_tpot_s(self) -> float:
         if not self.logical_inter_token_latencies_s:
             return 0.0
         return statistics.fmean(self.logical_inter_token_latencies_s)
+
+    @property
+    def p95_tpot_s(self) -> float:
+        return self._percentile(self.logical_inter_token_latencies_s, 95)
+
+    @property
+    def p99_tpot_s(self) -> float:
+        return self._percentile(self.logical_inter_token_latencies_s, 99)
 
     @property
     def branch_max_tpot_s(self) -> float:
@@ -127,17 +150,30 @@ class RequestTrace:
             return 0.0
         return statistics.fmean(self.branch_inter_token_latencies_s)
 
+    @property
+    def branch_p95_tpot_s(self) -> float:
+        return self._percentile(self.branch_inter_token_latencies_s, 95)
+
+    @property
+    def branch_p99_tpot_s(self) -> float:
+        return self._percentile(self.branch_inter_token_latencies_s, 99)
+
+    def tpot_s_for_slo(
+        self,
+        parallel_slo_mode: str,
+        tpot_slo_aggregation: str,
+    ) -> float:
+        prefix = "branch_" if parallel_slo_mode == "branch" else ""
+        return getattr(self, f"{prefix}{tpot_slo_aggregation}_tpot_s")
+
     def met_slo(
         self,
         ttft_slo_s: float,
         tpot_slo_s: float,
         parallel_slo_mode: str,
+        tpot_slo_aggregation: str,
     ) -> bool:
-        tpot_s = (
-            self.branch_max_tpot_s
-            if parallel_slo_mode == "branch"
-            else self.max_tpot_s
-        )
+        tpot_s = self.tpot_s_for_slo(parallel_slo_mode, tpot_slo_aggregation)
         return (
             self.finished
             and len(self.branch_tokens) == self.expected_branches
@@ -219,15 +255,13 @@ def build_workload(args: argparse.Namespace) -> list[WorkloadRequest]:
         prompts = load_jsonl_prompts(Path(args.prompt_jsonl), args.num_requests)
         if len(prompts) < args.num_requests:
             raise ValueError(
-                f"Only found {len(prompts)} JSONL prompts, "
-                f"need {args.num_requests}."
+                f"Only found {len(prompts)} JSONL prompts, need {args.num_requests}."
             )
     elif args.sharegpt_path:
         prompts = load_sharegpt_prompts(Path(args.sharegpt_path), args.num_requests)
         if len(prompts) < args.num_requests:
             raise ValueError(
-                f"Only found {len(prompts)} ShareGPT prompts, "
-                f"need {args.num_requests}."
+                f"Only found {len(prompts)} ShareGPT prompts, need {args.num_requests}."
             )
     else:
         prompts = [
@@ -271,7 +305,8 @@ def configure_mode_env(mode: str, args: argparse.Namespace) -> None:
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     os.environ["VLLM_ENABLE_TAPER_PLUS"] = (
         "1"
-        if mode in {
+        if mode
+        in {
             "irp_off",
             "taper",
             "taper_plus",
@@ -312,13 +347,10 @@ def configure_mode_env(mode: str, args: argparse.Namespace) -> None:
     )
     os.environ["VLLM_TAPER_PLUS_RECORD_LATENCY_SAMPLES"] = (
         "1"
-        if args.record_taper_latency_samples
-        or bool(args.write_taper_latency_profile)
+        if args.record_taper_latency_samples or bool(args.write_taper_latency_profile)
         else "0"
     )
-    os.environ["VLLM_TAPER_PLUS_CALIBRATION_ALPHA"] = str(
-        args.taper_calibration_alpha
-    )
+    os.environ["VLLM_TAPER_PLUS_CALIBRATION_ALPHA"] = str(args.taper_calibration_alpha)
     os.environ["VLLM_TAPER_PLUS_SAFETY_FACTOR"] = str(args.taper_safety_factor)
     os.environ["VLLM_TAPER_PLUS_EAGER_WHEN_UNPRESSURED"] = (
         "1" if args.enable_taper_eager_when_unpressured else "0"
@@ -330,17 +362,12 @@ def configure_mode_env(mode: str, args: argparse.Namespace) -> None:
     os.environ["VLLM_TAIL_BLEND_PREEMPTION"] = (
         "1" if args.enable_tail_blend_preemption else "0"
     )
-    os.environ["VLLM_TAIL_BLEND_PREEMPTION_MODE"] = (
-        args.tail_blend_preemption_mode
-    )
-    os.environ["VLLM_TAIL_BLEND_RESERVATION_Q"] = str(
-        args.tail_blend_reservation_q
-    )
+    os.environ["VLLM_TAIL_BLEND_PREEMPTION_MODE"] = args.tail_blend_preemption_mode
+    os.environ["VLLM_TAIL_BLEND_RESERVATION_Q"] = str(args.tail_blend_reservation_q)
+    os.environ["VLLM_TAIL_BLEND_ADMISSION_MODE"] = args.tail_blend_admission_mode
 
 
-def make_sampling_params(
-    args: argparse.Namespace, bon_n: int, seed: int | None = None
-):
+def make_sampling_params(args: argparse.Namespace, bon_n: int, seed: int | None = None):
     from vllm import SamplingParams
     from vllm.sampling_params import RequestOutputKind
 
@@ -383,12 +410,8 @@ def get_preemption_stats(engine: Any) -> dict[str, float]:
                     0,
                 )
             ),
-            "adaptive_default_count": float(
-                adaptive_counts.get("default", 0)
-            ),
-            "adaptive_full_count": float(
-                adaptive_counts.get("full", 0)
-            ),
+            "adaptive_default_count": float(adaptive_counts.get("default", 0)),
+            "adaptive_full_count": float(adaptive_counts.get("full", 0)),
             "adaptive_prefill_aware_count": float(
                 adaptive_counts.get("prefill_aware", 0)
             ),
@@ -422,22 +445,16 @@ def get_taper_latency_profile(
         fitted_coefficients = fit_taper_latency_coefficients(samples)
         if fitted_coefficients is None:
             fitted_coefficients = {
-                "base_ms": float(
-                    getattr(scheduler, "taper_plus_latency_base_ms")
-                ),
-                "width_ms": float(
-                    getattr(scheduler, "taper_plus_latency_width_ms")
-                ),
+                "base_ms": float(scheduler.taper_plus_latency_base_ms),
+                "width_ms": float(scheduler.taper_plus_latency_width_ms),
                 "context_ms_per_1k": float(
-                    getattr(scheduler, "taper_plus_latency_context_ms_per_1k")
+                    scheduler.taper_plus_latency_context_ms_per_1k
                 ),
             }
             fit_method = "online_final"
         else:
             fit_method = "offline_least_squares"
-        fitted_coefficients["safety_factor"] = float(
-            getattr(scheduler, "taper_plus_safety_factor")
-        )
+        fitted_coefficients["safety_factor"] = float(scheduler.taper_plus_safety_factor)
         return {
             "format": "vllm_taper_latency_profile_v1",
             "model": args.model,
@@ -490,9 +507,7 @@ def update_trace_from_output(
         branch_index = int(completion.index)
         last_time = trace.branch_last_token_time_s.get(branch_index)
         if last_time is not None:
-            trace.branch_inter_token_latencies_s.append(
-                (now - last_time) / num_tokens
-            )
+            trace.branch_inter_token_latencies_s.append((now - last_time) / num_tokens)
         trace.branch_last_token_time_s[branch_index] = now
         trace.branch_tokens[branch_index] = (
             trace.branch_tokens.get(branch_index, 0) + num_tokens
@@ -614,21 +629,16 @@ def run_one_mode(args: argparse.Namespace) -> dict[str, Any]:
                 if mode == "tail_blend"
                 else "taper"
             ),
-            "taper_online_calibration": (
-                not args.disable_taper_online_calibration
-            ),
+            "taper_online_calibration": (not args.disable_taper_online_calibration),
             "taper_calibration_alpha": args.taper_calibration_alpha,
             "taper_safety_factor": args.taper_safety_factor,
-            "taper_eager_when_unpressured": (
-                args.enable_taper_eager_when_unpressured
-            ),
-            "taper_branch_overdue_boost": (
-                not args.disable_taper_branch_overdue_boost
-            ),
+            "taper_eager_when_unpressured": (args.enable_taper_eager_when_unpressured),
+            "taper_branch_overdue_boost": (not args.disable_taper_branch_overdue_boost),
             "tail_blend_preemption": args.enable_tail_blend_preemption,
             "tail_blend_preemption_mode": args.tail_blend_preemption_mode,
             "tail_blend_pilot_k": args.tail_blend_pilot_k,
             "tail_blend_reservation_q": args.tail_blend_reservation_q,
+            "tail_blend_admission_mode": args.tail_blend_admission_mode,
             "parallel_slo_mode": args.parallel_slo_mode,
             "workload_seed": args.workload_seed,
         },
@@ -675,12 +685,19 @@ def trace_to_record(trace: RequestTrace, args: argparse.Namespace) -> dict[str, 
         "ttft_s": ttft_s,
         "latency_s": latency_s,
         "mean_tpot_s": trace.mean_tpot_s,
+        "p95_tpot_s": trace.p95_tpot_s,
+        "p99_tpot_s": trace.p99_tpot_s,
         "max_tpot_s": trace.max_tpot_s,
         "branch_mean_tpot_s": trace.branch_mean_tpot_s,
+        "branch_p95_tpot_s": trace.branch_p95_tpot_s,
+        "branch_p99_tpot_s": trace.branch_p99_tpot_s,
         "branch_max_tpot_s": trace.branch_max_tpot_s,
         "finished": trace.finished,
         "met_slo": trace.met_slo(
-            args.ttft_slo, args.tpot_slo, args.parallel_slo_mode
+            args.ttft_slo,
+            args.tpot_slo,
+            args.parallel_slo_mode,
+            args.tpot_slo_aggregation,
         ),
     }
 
@@ -723,15 +740,9 @@ def compute_metrics(
         "preempted_computed_tokens": float(
             preemption_stats["preempted_computed_tokens"]
         ),
-        "preempted_output_tokens": float(
-            preemption_stats["preempted_output_tokens"]
-        ),
-        "adaptive_default_count": float(
-            preemption_stats["adaptive_default_count"]
-        ),
-        "adaptive_full_count": float(
-            preemption_stats["adaptive_full_count"]
-        ),
+        "preempted_output_tokens": float(preemption_stats["preempted_output_tokens"]),
+        "adaptive_default_count": float(preemption_stats["adaptive_default_count"]),
+        "adaptive_full_count": float(preemption_stats["adaptive_full_count"]),
         "adaptive_prefill_aware_count": float(
             preemption_stats["adaptive_prefill_aware_count"]
         ),
@@ -821,8 +832,12 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "ttft_s",
         "latency_s",
         "mean_tpot_s",
+        "p95_tpot_s",
+        "p99_tpot_s",
         "max_tpot_s",
         "branch_mean_tpot_s",
+        "branch_p95_tpot_s",
+        "branch_p99_tpot_s",
         "branch_max_tpot_s",
         "finished",
         "met_slo",
@@ -879,9 +894,7 @@ def print_comparison(results: Iterable[dict[str, Any]]) -> None:
     print("\nBoN Scheduling Benchmark")
     width = 28 + 23 * len(modes)
     print("=" * width)
-    header = f"{'Metric':<28}" + "".join(
-        f" {MODE_LABELS[mode]:>22}" for mode in modes
-    )
+    header = f"{'Metric':<28}" + "".join(f" {MODE_LABELS[mode]:>22}" for mode in modes)
     print(header)
     print("-" * width)
     for label, key, suffix in rows:
@@ -977,7 +990,8 @@ def run_both(args: argparse.Namespace) -> None:
         env = os.environ.copy()
         env["VLLM_ENABLE_TAPER_PLUS"] = (
             "1"
-            if mode in {
+            if mode
+            in {
                 "irp_off",
                 "taper",
                 "taper_plus",
@@ -1091,6 +1105,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--ttft-slo", type=float, default=2.0)
     parser.add_argument("--tpot-slo", type=float, default=0.05)
     parser.add_argument(
+        "--tpot-slo-aggregation",
+        choices=["max", "p99", "p95", "mean"],
+        default="max",
+        help=(
+            "TPOT statistic used for SLO pass/fail. max preserves the "
+            "original strict SLO; p99/p95/mean are useful diagnostics for "
+            "separating one-step stalls from sustained slowdowns."
+        ),
+    )
+    parser.add_argument(
         "--parallel-slo-mode",
         choices=["logical", "branch"],
         default="logical",
@@ -1195,6 +1219,18 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--tail-blend-admission-mode",
+        dest="tail_blend_admission_mode",
+        type=str,
+        default="off",
+        choices=["off", "ttft_guarded"],
+        help=(
+            "For --mode tail_blend, keep eager admission by default or enable "
+            "a guarded TTFT-risk controller that limits extra BoN siblings "
+            "only under clear first-token pressure."
+        ),
+    )
+    parser.add_argument(
         "--enable-tail-blend-preemption",
         "--enable-eager-tail-blend-preemption",
         dest="enable_tail_blend_preemption",
@@ -1217,6 +1253,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "full",
             "full_v2",
             "full_slo",
+            "complicated",
+            "simplified",
             "prefill_aware",
             "prefill_aware_gated",
             "adaptive",

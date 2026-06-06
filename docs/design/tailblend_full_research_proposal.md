@@ -119,16 +119,18 @@ The current TailBlend score is:
 
 ```python
 score_tailblend =
-    1.6 * remaining_norm
-  - 1.2 * output_progress
-  - 1.0 * parent_rescue
-  - 0.8 * recompute_cost
-  - 1.0 * near_finish
-  - 0.4 * overdue
-  - 0.2 * num_preemptions
+    remaining_norm
+  - invested_progress
+  - completion_protection
+
+invested_progress =
+    0.5 * (output_progress + recompute_cost)
+
+completion_protection =
+    max(parent_rescue, near_finish, overdue)
 ```
 
-Higher score means a better preemption victim. The score uses `remaining_norm` rather than raw `pred_remaining` so that requests with different `max_tokens` are comparable. The `near_finish` and `overdue` terms are binary indicators, while `num_preemptions` is a small anti-starvation penalty. Intuitively, TailBlend prefers to evict branches that are predicted to run long, have generated little useful prefix, are expensive for their parent to wait on, and do not appear close to releasing memory. It protects branches that are near completion, expensive to recompute, or likely to rescue the logical parent.
+Higher score means a better preemption victim. The score uses `remaining_norm` rather than raw `pred_remaining` so that requests with different `max_tokens` are comparable. The simplified score has three reviewer-visible concepts: evict branches with a long predicted tail, protect branches where the system has already invested useful work, and protect branches that may complete a user-visible parent soon. `near_finish` and `overdue` are binary inputs to `completion_protection`, so either condition fully protects the branch in the same way as a high parent-rescue signal.
 
 ### 3.3 Online Tail Prediction from Finished Siblings
 
@@ -265,7 +267,7 @@ For GSM8K, MBPP, and UltraChat, we use `max_output_tokens=4096` and `max_model_l
 #### Main policy: Default vLLM-BoN vs TailBlend
 
 | Dataset | N | Default vLLM-BoN Goodput | TailBlend Goodput | Delta | Default vLLM-BoN SLO | TailBlend SLO |
-|---|---:|---:|---:|---:|---:|---:|
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | GSM8K | 8 | 2802.41 | 3037.46 | +8.4% | 82.5% | 92.5% |
 | GSM8K | 16 | 1941.17 | 2186.62 | +12.6% | 45.0% | 55.0% |
 | MBPP | 8 | 2212.23 | 2303.87 | +4.1% | 72.5% | 72.5% |
@@ -280,7 +282,7 @@ These results support the main hypothesis for output-tail workloads. TailBlend i
 #### Exploratory extension: Adaptive selector with prefix-waste guard
 
 | Dataset | N | Default vLLM-BoN Goodput | TailBlend Goodput | TailBlend-Adaptive Goodput | Adaptive vs Default vLLM-BoN | Adaptive vs TailBlend |
-|---|---:|---:|---:|---:|---:|---:|
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | GSM8K | 8 | 2802.41 | 3037.46 | 3111.65 | +11.0% | +2.4% |
 | GSM8K | 16 | 1941.17 | 2186.62 | 1975.78 | +1.8% | -9.6% |
 | MBPP | 8 | 2212.23 | 2303.87 | 2326.46 | +5.2% | +1.0% |
@@ -384,40 +386,40 @@ The report deadline is September 5, 2026. The schedule below reserves the final 
 
 ## 7. References
 
-[1] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, Ion Stoica. "Efficient Memory Management for Large Language Model Serving with PagedAttention." SOSP 2023. https://arxiv.org/abs/2309.06180
+[1] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, Ion Stoica. "Efficient Memory Management for Large Language Model Serving with PagedAttention." SOSP 2023. <https://arxiv.org/abs/2309.06180>
 
-[2] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, Byung-Gon Chun. "Orca: A Distributed Serving System for Transformer-Based Generative Models." OSDI 2022. https://www.usenix.org/conference/osdi22/presentation/yu
+[2] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, Byung-Gon Chun. "Orca: A Distributed Serving System for Transformer-Based Generative Models." OSDI 2022. <https://www.usenix.org/conference/osdi22/presentation/yu>
 
-[3] Bradley Brown, Jordan Juravsky, Ryan Ehrlich, Ronald Clark, Quoc V. Le, Christopher Re, Azalia Mirhoseini. "Large Language Monkeys: Scaling Inference Compute with Repeated Sampling." arXiv:2407.21787, 2024. https://arxiv.org/abs/2407.21787
+[3] Bradley Brown, Jordan Juravsky, Ryan Ehrlich, Ronald Clark, Quoc V. Le, Christopher Re, Azalia Mirhoseini. "Large Language Monkeys: Scaling Inference Compute with Repeated Sampling." arXiv:2407.21787, 2024. <https://arxiv.org/abs/2407.21787>
 
-[4] Swapnil Gandhi, Siva Hari, William J. Dally, Christos Kozyrakis. "Regulating Branch Parallelism in LLM Serving." arXiv:2605.06914, 2026. https://arxiv.org/abs/2605.06914
+[4] Swapnil Gandhi, Siva Hari, William J. Dally, Christos Kozyrakis. "Regulating Branch Parallelism in LLM Serving." arXiv:2605.06914, 2026. <https://arxiv.org/abs/2605.06914>
 
-[5] Jing Wang, Yu-Yang Qian, Ke Xue, Chao Qian, Peng Zhao, Zhi-Hua Zhou. "Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions." arXiv:2604.07931, 2026. https://arxiv.org/abs/2604.07931
+[5] Jing Wang, Yu-Yang Qian, Ke Xue, Chao Qian, Peng Zhao, Zhi-Hua Zhou. "Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions." arXiv:2604.07931, 2026. <https://arxiv.org/abs/2604.07931>
 
-[6] Haoyu Zheng, Yongqiang Zhang, Fangcheng Fu, Xiaokai Zhou, Hao Luo, Hongchao Zhu, Yuanyuan Zhu, Hao Wang, Xiao Yan, Jiawei Jiang. "Scheduling LLM Inference with Uncertainty-Aware Output Length Predictions." arXiv:2604.00499, 2026. https://arxiv.org/abs/2604.00499
+[6] Haoyu Zheng, Yongqiang Zhang, Fangcheng Fu, Xiaokai Zhou, Hao Luo, Hongchao Zhu, Yuanyuan Zhu, Hao Wang, Xiao Yan, Jiawei Jiang. "Scheduling LLM Inference with Uncertainty-Aware Output Length Predictions." arXiv:2604.00499, 2026. <https://arxiv.org/abs/2604.00499>
 
-[7] Xuezhi Wang, Jason Wei, Dale Schuurmans, Quoc V. Le, Ed H. Chi, Sharan Narang, Aakanksha Chowdhery, Denny Zhou. "Self-Consistency Improves Chain of Thought Reasoning in Language Models." ICLR 2023. https://arxiv.org/abs/2203.11171
+[7] Xuezhi Wang, Jason Wei, Dale Schuurmans, Quoc V. Le, Ed H. Chi, Sharan Narang, Aakanksha Chowdhery, Denny Zhou. "Self-Consistency Improves Chain of Thought Reasoning in Language Models." ICLR 2023. <https://arxiv.org/abs/2203.11171>
 
-[8] Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, John Schulman. "Training Verifiers to Solve Math Word Problems." arXiv:2110.14168, 2021. https://arxiv.org/abs/2110.14168
+[8] Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, John Schulman. "Training Verifiers to Solve Math Word Problems." arXiv:2110.14168, 2021. <https://arxiv.org/abs/2110.14168>
 
-[9] Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, et al. "Evaluating Large Language Models Trained on Code." arXiv:2107.03374, 2021. https://arxiv.org/abs/2107.03374
+[9] Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, et al. "Evaluating Large Language Models Trained on Code." arXiv:2107.03374, 2021. <https://arxiv.org/abs/2107.03374>
 
-[10] Yinlam Chow, Guy Tennenholtz, Izzeddin Gur, Vincent Zhuang, Bo Dai, Aviral Kumar, Rishabh Agarwal, Sridhar Thiagarajan, Craig Boutilier, Aleksandra Faust. "Inference-Aware Fine-Tuning for Best-of-N Sampling in Large Language Models." ICLR 2025. https://proceedings.iclr.cc/paper_files/paper/2025/hash/c40bed606c51c8e827c1ba75aa2da054-Abstract-Conference.html
+[10] Yinlam Chow, Guy Tennenholtz, Izzeddin Gur, Vincent Zhuang, Bo Dai, Aviral Kumar, Rishabh Agarwal, Sridhar Thiagarajan, Craig Boutilier, Aleksandra Faust. "Inference-Aware Fine-Tuning for Best-of-N Sampling in Large Language Models." ICLR 2025. <https://proceedings.iclr.cc/paper_files/paper/2025/hash/c40bed606c51c8e827c1ba75aa2da054-Abstract-Conference.html>
 
-[11] Lin Gui, Cristina Garbacea, Victor Veitch. "BoNBoN Alignment for Large Language Models and the Sweetness of Best-of-n Sampling." NeurIPS 2024. https://proceedings.neurips.cc/paper_files/paper/2024/hash/056521a35eacd9d2127b66a7d3c499c5-Abstract-Conference.html
+[11] Lin Gui, Cristina Garbacea, Victor Veitch. "BoNBoN Alignment for Large Language Models and the Sweetness of Best-of-n Sampling." NeurIPS 2024. <https://proceedings.neurips.cc/paper_files/paper/2024/hash/056521a35eacd9d2127b66a7d3c499c5-Abstract-Conference.html>
 
-[12] Audrey Huang, Adam Block, Qinghua Liu, Nan Jiang, Akshay Krishnamurthy, Dylan J. Foster. "Is Best-of-N the Best of Them? Coverage, Scaling, and Optimality in Inference-Time Alignment." ICML 2025. https://proceedings.mlr.press/v267/huang25c.html
+[12] Audrey Huang, Adam Block, Qinghua Liu, Nan Jiang, Akshay Krishnamurthy, Dylan J. Foster. "Is Best-of-N the Best of Them? Coverage, Scaling, and Optimality in Inference-Time Alignment." ICML 2025. <https://proceedings.mlr.press/v267/huang25c.html>
 
-[13] Charlie Snell, Jaehoon Lee, Kelvin Xu, Aviral Kumar. "Scaling LLM Test-Time Compute Optimally Can be More Effective than Scaling Parameters for Reasoning." ICLR 2025. https://proceedings.iclr.cc/paper_files/paper/2025/hash/1b623663fd9b874366f3ce019fdfdd44-Abstract-Conference.html
+[13] Charlie Snell, Jaehoon Lee, Kelvin Xu, Aviral Kumar. "Scaling LLM Test-Time Compute Optimally Can be More Effective than Scaling Parameters for Reasoning." ICLR 2025. <https://proceedings.iclr.cc/paper_files/paper/2025/hash/1b623663fd9b874366f3ce019fdfdd44-Abstract-Conference.html>
 
-[14] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav Gulavani, Alexey Tumanov, Ramachandran Ramjee. "Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve." OSDI 2024. https://www.usenix.org/conference/osdi24/presentation/agrawal
+[14] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav Gulavani, Alexey Tumanov, Ramachandran Ramjee. "Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve." OSDI 2024. <https://www.usenix.org/conference/osdi24/presentation/agrawal>
 
-[15] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xuanzhe Liu, Xin Jin, Hao Zhang. "DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving." OSDI 2024. https://www.usenix.org/conference/osdi24/presentation/zhong-yinmin
+[15] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xuanzhe Liu, Xin Jin, Hao Zhang. "DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving." OSDI 2024. <https://www.usenix.org/conference/osdi24/presentation/zhong-yinmin>
 
-[16] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, Ying Sheng. "SGLang: Efficient Execution of Structured Language Model Programs." NeurIPS 2024. https://proceedings.neurips.cc/paper_files/paper/2024/hash/724be4472168f31ba1c9ac630f15dec8-Abstract-Conference.html
+[16] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, Ying Sheng. "SGLang: Efficient Execution of Structured Language Model Programs." NeurIPS 2024. <https://proceedings.neurips.cc/paper_files/paper/2024/hash/724be4472168f31ba1c9ac630f15dec8-Abstract-Conference.html>
 
-[17] Vikranth Srivatsa, Zijian He, Reyna Abhyankar, Dongming Li, Yiying Zhang. "Preble: Efficient Distributed Prompt Scheduling for LLM Serving." arXiv:2407.00023, 2024. https://arxiv.org/abs/2407.00023
+[17] Vikranth Srivatsa, Zijian He, Reyna Abhyankar, Dongming Li, Yiying Zhang. "Preble: Efficient Distributed Prompt Scheduling for LLM Serving." arXiv:2407.00023, 2024. <https://arxiv.org/abs/2407.00023>
 
-[18] Ruihao Gong, Shihao Bai, Siyu Wu, Yunqian Fan, Zaijun Wang, Xiuhong Li, Hailong Yang, Xianglong Liu. "Past-Future Scheduler for LLM Serving under SLA Guarantees." ASPLOS 2025. https://arxiv.org/abs/2507.10150
+[18] Ruihao Gong, Shihao Bai, Siyu Wu, Yunqian Fan, Zaijun Wang, Xiuhong Li, Hailong Yang, Xianglong Liu. "Past-Future Scheduler for LLM Serving under SLA Guarantees." ASPLOS 2025. <https://arxiv.org/abs/2507.10150>
 
-[19] Yuhang Li, Rong Gu, Chengying Huan, Zhibin Wang, Renjie Yao, Chen Tian, Guihai Chen. "HotPrefix: Hotness-Aware KV Cache Scheduling for Efficient Prefix Sharing in LLM Inference Systems." Proc. ACM Manag. Data 3, 4 (SIGMOD), Article 250, 2025. https://doi.org/10.1145/3749168
+[19] Yuhang Li, Rong Gu, Chengying Huan, Zhibin Wang, Renjie Yao, Chen Tian, Guihai Chen. "HotPrefix: Hotness-Aware KV Cache Scheduling for Efficient Prefix Sharing in LLM Inference Systems." Proc. ACM Manag. Data 3, 4 (SIGMOD), Article 250, 2025. <https://doi.org/10.1145/3749168>

@@ -265,6 +265,7 @@ if TYPE_CHECKING:
     # full, prefill_aware, prefill_aware_gated, adaptive, and ablations.
     VLLM_TAIL_BLEND_PREEMPTION_MODE: str = "full"
     VLLM_TAIL_BLEND_RESERVATION_Q: float = 0.0
+    VLLM_TAIL_BLEND_ADMISSION_MODE: str = "off"
     # Deprecated aliases retained for older experiment scripts.
     VLLM_EAGER_TAIL_BLEND_PILOT_K: int = 0
     VLLM_EAGER_TAIL_BLEND_PREEMPTION: bool = False
@@ -1751,9 +1752,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_TAPER_PLUS": lambda: bool(
         int(os.getenv("VLLM_ENABLE_TAPER_PLUS", "0"))
     ),
-    "VLLM_TAPER_PLUS_POLICY": lambda: os.getenv(
-        "VLLM_TAPER_PLUS_POLICY", "taper_plus"
-    ),
+    "VLLM_TAPER_PLUS_POLICY": lambda: os.getenv("VLLM_TAPER_PLUS_POLICY", "taper_plus"),
     "VLLM_TAIL_BLEND_PILOT_K": lambda: int(
         os.getenv(
             "VLLM_TAIL_BLEND_PILOT_K",
@@ -1777,6 +1776,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "VLLM_TAIL_BLEND_RESERVATION_Q",
             os.getenv("VLLM_EAGER_TAIL_BLEND_RESERVATION_Q", "0.0"),
         )
+    ),
+    "VLLM_TAIL_BLEND_ADMISSION_MODE": lambda: os.getenv(
+        "VLLM_TAIL_BLEND_ADMISSION_MODE", "off"
     ),
     "VLLM_EAGER_TAIL_BLEND_PILOT_K": lambda: int(
         os.getenv(
@@ -1822,12 +1824,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TAPER_PLUS_TPOT_SLO_MS": lambda: float(
         os.getenv("VLLM_TAPER_PLUS_TPOT_SLO_MS", "50.0")
     ),
-    "VLLM_TAPER_PLUS_RHO": lambda: float(
-        os.getenv("VLLM_TAPER_PLUS_RHO", "1.0")
-    ),
-    "VLLM_TAPER_PLUS_UTILITY": lambda: os.getenv(
-        "VLLM_TAPER_PLUS_UTILITY", "linear"
-    ),
+    "VLLM_TAPER_PLUS_RHO": lambda: float(os.getenv("VLLM_TAPER_PLUS_RHO", "1.0")),
+    "VLLM_TAPER_PLUS_UTILITY": lambda: os.getenv("VLLM_TAPER_PLUS_UTILITY", "linear"),
     # Online calibration updates the latency model from observed step times.
     "VLLM_TAPER_PLUS_ONLINE_CALIBRATION": lambda: bool(
         int(os.getenv("VLLM_TAPER_PLUS_ONLINE_CALIBRATION", "1"))

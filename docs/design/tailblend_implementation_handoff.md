@@ -46,8 +46,6 @@ Important changes:
   `tail_blend_pilot_k`, `tail_blend_preemption`,
   `tail_blend_preemption_mode`, and `tail_blend_reservation_q`;
 - creates `self.tail_blend_controller`;
-- calls `tail_blend_controller.plan_admitted_req_ids(...)` when the active
-  policy is `tail_blend`;
 - calls `tail_blend_controller.select_preemption_victim(...)` only after
   `kv_cache_manager.allocate_slots(...)` returns `None`;
 - calls `tail_blend_controller.should_defer_waiting_request(...)` for optional
@@ -57,6 +55,9 @@ Important changes:
 
 The most important invariant is that TailBlend preemption is pressure-only:
 the victim hook is reached only after `allocate_slots` fails.
+The main `tail_blend` policy also bypasses TAPER+ decode planning and online
+latency calibration so no-KV-pressure execution matches Default vLLM-BoN as
+closely as possible.
 
 ### `vllm/v1/core/sched/tail_blend_controller.py`
 
@@ -78,11 +79,13 @@ Key methods:
 - `should_defer_waiting_request(request)`: optional waiting-admission gate.
   With `VLLM_TAIL_BLEND_PILOT_K=0` and
   `VLLM_TAIL_BLEND_RESERVATION_Q=0`, this keeps normal eager admission.
-- `plan_admitted_req_ids(token_budget)`: optional decode ordering hint under
-  contention. It returns `None` when every runnable branch can be scheduled.
 - `select_preemption_victim(current_request)`: pressure-time victim selector.
   This is the main TailBlend hook.
 - `_preemption_victim_key(...)`: implements the score used to rank victims.
+  The main `full` score is `remaining_norm - invested_progress -
+  completion_protection`, where `invested_progress` averages generated output
+  progress and recompute cost, and `completion_protection` is the strongest
+  parent-rescue, near-finish, or overdue signal.
 - `_predict_remaining_tokens(request)`: online sibling-length estimator.
 - `_parent_rescue_score(group_id)`: estimates whether a branch may help finish
   an almost-complete BoN parent.
