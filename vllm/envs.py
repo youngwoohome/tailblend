@@ -265,6 +265,8 @@ if TYPE_CHECKING:
     # full, prefill_aware, prefill_aware_gated, adaptive, and ablations.
     VLLM_TAIL_BLEND_PREEMPTION_MODE: str = "full"
     VLLM_TAIL_BLEND_RESERVATION_Q: float = 0.0
+    # Supported values: off, ttft_guarded, ttft_fair_guarded,
+    # ttft_cost_guarded (legacy alias for ttft_fair_guarded).
     VLLM_TAIL_BLEND_ADMISSION_MODE: str = "off"
     # Deprecated aliases retained for older experiment scripts.
     VLLM_EAGER_TAIL_BLEND_PILOT_K: int = 0

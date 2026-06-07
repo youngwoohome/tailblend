@@ -1223,11 +1223,17 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         dest="tail_blend_admission_mode",
         type=str,
         default="off",
-        choices=["off", "ttft_guarded"],
+        choices=[
+            "off",
+            "ttft_guarded",
+            "ttft_fair_guarded",
+            "ttft_cost_guarded",
+        ],
         help=(
             "For --mode tail_blend, keep eager admission by default or enable "
-            "a guarded TTFT-risk controller that limits extra BoN siblings "
-            "only under clear first-token pressure."
+            "a guarded TTFT-risk controller. ttft_fair_guarded limits extra "
+            "BoN siblings while preserving first-branch admission; "
+            "ttft_cost_guarded is a legacy alias for the fair guard."
         ),
     )
     parser.add_argument(

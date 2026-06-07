@@ -310,10 +310,17 @@ class Scheduler(SchedulerInterface):
             0.0, min(1.0, envs.VLLM_TAIL_BLEND_RESERVATION_Q)
         )
         self.tail_blend_admission_mode = envs.VLLM_TAIL_BLEND_ADMISSION_MODE
-        if self.tail_blend_admission_mode not in ("off", "ttft_guarded"):
+        if self.tail_blend_admission_mode not in (
+            "off",
+            "ttft_guarded",
+            "ttft_fair_guarded",
+            "ttft_cost_guarded",
+        ):
             raise ValueError(
-                "VLLM_TAIL_BLEND_ADMISSION_MODE must be 'off' or "
-                f"'ttft_guarded', got {self.tail_blend_admission_mode!r}."
+                "VLLM_TAIL_BLEND_ADMISSION_MODE must be 'off', "
+                "'ttft_guarded', 'ttft_fair_guarded', or "
+                "'ttft_cost_guarded', got "
+                f"{self.tail_blend_admission_mode!r}."
             )
         # Backward-compatible aliases for existing experiment scripts.
         self.eager_tail_blend_pilot_k = self.tail_blend_pilot_k

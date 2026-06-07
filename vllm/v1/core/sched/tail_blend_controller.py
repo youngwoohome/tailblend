@@ -153,172 +153,14 @@ class TailBlendController:
         return best_group_id is not None and group_id != best_group_id
 
     def plan_admitted_running_req_ids(self, token_budget: int) -> set[str] | None:
-        """Guard TailBlend decode width only under clear TTFT pressure.
+        """TailBlend TTFT guards do not regulate running decode width.
 
-        The fail-open path returns ``None`` so stock eager scheduling remains
-        unchanged outside the overloaded BoN cases. When active, the planner
-        protects one branch per logical parent first, then spends remaining
-        decode width on catch-up branches using slack and branch-overdue signals.
+        Earlier TTFT-guard variants also selected a subset of already-running
+        branches for decode. Long-prompt runs showed that this can preserve TTFT
+        while destroying TPOT, so admission guardrails now only affect waiting
+        requests and leave running decode scheduling on the stock eager path.
         """
-        scheduler = self.scheduler
-        if token_budget <= 0 or scheduler.tail_blend_admission_mode != "ttft_guarded":
-            return None
-
-        now_s = time.time()
-        pressure = self._tail_blend_admission_pressure(now_s)
-        if not pressure.active:
-            return None
-
-        always_admitted: set[str] = set()
-        group_to_candidates: dict[str, list[Request]] = defaultdict(list)
-        candidates: list[Request] = []
-        for request in scheduler.running:
-            if (
-                not scheduler._is_taper_plus_decode_candidate(request)
-                or request.external_req_id is None
-            ):
-                always_admitted.add(request.request_id)
-                continue
-            group_id = scheduler._taper_plus_group_id(request)
-            group_to_candidates[group_id].append(request)
-            candidates.append(request)
-
-        if not candidates or len(group_to_candidates) <= 1:
-            return None
-
-        available_slots = token_budget - len(always_admitted)
-        if available_slots <= 0:
-            return always_admitted
-        if available_slots >= len(candidates):
-            return None
-
-        selected: set[str] = set()
-        selected_requests: list[Request] = []
-        sorted_group_ids = sorted(
-            group_to_candidates,
-            key=lambda group_id: self._ttft_guard_group_key(
-                group_id,
-                group_to_candidates[group_id],
-                now_s,
-            ),
-        )
-
-        for group_id in sorted_group_ids:
-            if len(selected_requests) >= available_slots:
-                break
-            request = min(
-                group_to_candidates[group_id],
-                key=lambda candidate: self._ttft_guard_baseline_request_key(
-                    candidate,
-                    now_s,
-                ),
-            )
-            selected.add(request.request_id)
-            selected_requests.append(request)
-
-        if len(selected_requests) < available_slots:
-            active_decode_width = len(selected_requests)
-            active_context_tokens = sum(
-                request.num_computed_tokens for request in selected_requests
-            )
-            baseline_step_ms = scheduler._predict_taper_plus_step_ms(
-                active_decode_width,
-                active_context_tokens,
-            )
-            admitted_width_by_group: dict[str, int] = defaultdict(int)
-            for request in selected_requests:
-                admitted_width_by_group[scheduler._taper_plus_group_id(request)] += 1
-
-            remaining = [
-                request for request in candidates if request.request_id not in selected
-            ]
-            while remaining and len(selected_requests) < available_slots:
-                best_request: Request | None = None
-                best_score = 0.0
-                best_predicted_step_ms = baseline_step_ms
-                for request in remaining:
-                    group_id = scheduler._taper_plus_group_id(request)
-                    requests = group_to_candidates[group_id]
-                    if not self._group_has_first_token(group_id, requests):
-                        continue
-
-                    predicted_step_ms = scheduler._predict_taper_plus_step_ms(
-                        active_decode_width + 1,
-                        active_context_tokens + request.num_computed_tokens,
-                    )
-                    parent_slack_ms = (
-                        max(
-                            0.0,
-                            scheduler._get_taper_plus_group_deadline_s(requests)
-                            - now_s,
-                        )
-                        * 1000.0
-                    )
-                    candidate_budget_ms = baseline_step_ms + (
-                        scheduler.taper_plus_rho
-                        * max(0.0, parent_slack_ms - baseline_step_ms)
-                    )
-                    branch_overdue_ms = (
-                        scheduler._get_taper_plus_branch_overdue_ms(
-                            request,
-                            now_s,
-                        )
-                        if scheduler.taper_plus_branch_overdue_boost
-                        else 0.0
-                    )
-                    if branch_overdue_ms > 0.0:
-                        candidate_budget_ms = max(
-                            candidate_budget_ms,
-                            predicted_step_ms,
-                        )
-                    if predicted_step_ms > candidate_budget_ms:
-                        continue
-
-                    parent_state = self._parent_slo_state(group_id, now_s)
-                    if parent_state.doomed >= 0.85 and branch_overdue_ms <= 0.0:
-                        continue
-
-                    marginal_utility = scheduler._taper_plus_marginal_utility(
-                        admitted_width_by_group[group_id]
-                    )
-                    if branch_overdue_ms > 0.0:
-                        marginal_utility *= 1.0 + branch_overdue_ms / max(
-                            1.0,
-                            scheduler.taper_plus_tpot_slo_s * 1000.0,
-                        )
-                    remaining_norm = self._predict_remaining_tokens(request) / float(
-                        max(1, request.max_tokens)
-                    )
-                    short_lifetime_bonus = max(0.0, 1.0 - remaining_norm)
-                    marginal_utility *= 1.0 + 0.25 * short_lifetime_bonus
-                    marginal_utility *= 1.0 - 0.50 * parent_state.doomed
-
-                    marginal_step_ms = max(
-                        0.0,
-                        predicted_step_ms - baseline_step_ms,
-                    )
-                    score = marginal_utility / (1e-6 + marginal_step_ms)
-                    if best_request is None or score > best_score:
-                        best_request = request
-                        best_score = score
-                        best_predicted_step_ms = predicted_step_ms
-
-                if best_request is None or best_score <= 0.0:
-                    break
-
-                selected.add(best_request.request_id)
-                selected_requests.append(best_request)
-                active_decode_width += 1
-                active_context_tokens += best_request.num_computed_tokens
-                baseline_step_ms = best_predicted_step_ms
-                admitted_width_by_group[
-                    scheduler._taper_plus_group_id(best_request)
-                ] += 1
-                remaining.remove(best_request)
-
-        admitted = set(always_admitted)
-        admitted.update(selected)
-        return admitted
+        return None
 
     def select_preemption_victim(
         self,
@@ -946,24 +788,36 @@ class TailBlendController:
 
     def _should_defer_for_ttft_guard(self, request: Request) -> bool:
         scheduler = self.scheduler
-        if scheduler.tail_blend_admission_mode != "ttft_guarded":
+        mode = scheduler.tail_blend_admission_mode
+        if mode in ("ttft_fair_guarded", "ttft_cost_guarded"):
+            return self._should_defer_for_ttft_fair_guard(request)
+        if mode != "ttft_guarded":
             return False
 
         now_s = time.time()
         pressure = self._tail_blend_admission_pressure(now_s)
         if not pressure.active:
             return False
+        if self._should_preserve_prompt_locality_for_ttft_guard(
+            request,
+            running_util=pressure.running_util,
+            waiting_backlog=pressure.waiting_backlog,
+            free_block_ratio=pressure.free_block_ratio,
+        ):
+            return False
 
         group_id = scheduler._taper_plus_group_id(request)
         protected_width = max(1, scheduler.tail_blend_pilot_k)
-        if self._started_sibling_count(group_id) < protected_width:
-            return False
-
+        started_siblings = self._started_sibling_count(group_id)
         running_requests = [
             running_request
             for running_request in scheduler.running
             if scheduler._taper_plus_group_id(running_request) == group_id
         ]
+
+        if started_siblings < protected_width:
+            return False
+
         if not self._group_has_first_token(group_id, running_requests):
             return True
 
@@ -972,15 +826,102 @@ class TailBlendController:
             return True
         return group_id != best_group_id
 
+    def _should_defer_for_ttft_fair_guard(self, request: Request) -> bool:
+        scheduler = self.scheduler
+        if request.external_req_id is None:
+            return False
+
+        group_id = scheduler._taper_plus_group_id(request)
+        protected_width = max(1, scheduler.tail_blend_pilot_k)
+        if self._started_sibling_count(group_id) < protected_width:
+            return False
+
+        waiting_backlog = len(scheduler.waiting) + len(scheduler.skipped_waiting)
+        if waiting_backlog <= 0:
+            return False
+        if self._should_preserve_prompt_locality_for_ttft_guard(
+            request,
+            waiting_backlog=waiting_backlog,
+        ):
+            return False
+
+        max_running = max(1, scheduler.max_num_running_reqs)
+        running_util = len(scheduler.running) / float(max_running)
+        return running_util >= 0.50 or self._has_zero_start_waiting_group(
+            exclude_group_id=group_id
+        )
+
+    def _should_preserve_prompt_locality_for_ttft_guard(
+        self,
+        request: Request,
+        *,
+        running_util: float | None = None,
+        waiting_backlog: int | None = None,
+        free_block_ratio: float | None = None,
+    ) -> bool:
+        if request.external_req_id is None:
+            return False
+
+        prompt_tokens = max(0, request.num_prompt_tokens)
+        max_tokens = max(1, request.max_tokens)
+        total_tokens = max(1, prompt_tokens + max_tokens)
+        prompt_share = prompt_tokens / float(total_tokens)
+        prompt_heavy = prompt_tokens >= 1024 and (
+            prompt_share >= 0.40 or prompt_tokens >= max_tokens
+        )
+        if not prompt_heavy:
+            return False
+
+        scheduler = self.scheduler
+        if waiting_backlog is None:
+            waiting_backlog = len(scheduler.waiting) + len(scheduler.skipped_waiting)
+        if waiting_backlog <= 0:
+            return False
+
+        if running_util is None:
+            max_running = max(1, scheduler.max_num_running_reqs)
+            running_util = len(scheduler.running) / float(max_running)
+        if free_block_ratio is None:
+            try:
+                total_blocks = max(
+                    1,
+                    scheduler.kv_cache_manager.block_pool.num_gpu_blocks,
+                )
+                free_blocks = scheduler.kv_cache_manager.get_remaining_free_blocks()
+                free_block_ratio = min(1.0, free_blocks / float(total_blocks))
+            except Exception:
+                free_block_ratio = 1.0
+
+        return running_util >= 0.75 or free_block_ratio <= 0.25
+
+    def _has_zero_start_waiting_group(self, exclude_group_id: str) -> bool:
+        scheduler = self.scheduler
+        started_group_ids = {
+            scheduler._taper_plus_group_id(request)
+            for request in scheduler.running
+            if request.external_req_id is not None
+        }
+        started_group_ids.update(
+            group_id
+            for group_id, state in self._groups.items()
+            if state.finished_lengths
+        )
+        for queue in (scheduler.waiting, scheduler.skipped_waiting):
+            for request in queue:
+                if request.external_req_id is None:
+                    continue
+                group_id = scheduler._taper_plus_group_id(request)
+                if group_id != exclude_group_id and group_id not in started_group_ids:
+                    return True
+        return False
+
     def _tail_blend_admission_pressure(
         self,
         now_s: float,
     ) -> _TailBlendAdmissionPressure:
         scheduler = self.scheduler
-        if (
-            scheduler.tail_blend_admission_mode != "ttft_guarded"
-            or scheduler.taper_plus_ttft_slo_s <= 0.0
-        ):
+        mode = scheduler.tail_blend_admission_mode
+        if mode != "ttft_guarded" or scheduler.taper_plus_ttft_slo_s <= 0.0:
             return _TailBlendAdmissionPressure(
                 active=False,
                 running_util=0.0,

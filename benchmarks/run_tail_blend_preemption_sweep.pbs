@@ -28,6 +28,7 @@ TTFT_SLO="${TTFT_SLO:-180.0}"
 TPOT_SLO="${TPOT_SLO:-0.20}"
 TPOT_SLO_AGGREGATION="${TPOT_SLO_AGGREGATION:-p99}"
 TAIL_BLEND_ADMISSION_MODE="${TAIL_BLEND_ADMISSION_MODE:-off}"
+TAIL_BLEND_PREEMPTION_MODE="${TAIL_BLEND_PREEMPTION_MODE:-full}"
 IGNORE_EOS="${IGNORE_EOS:-0}"
 FIRST_MODE="${FIRST_MODE:-tail_blend}"
 SECOND_MODE="${SECOND_MODE:-irp_eager}"
@@ -91,7 +92,7 @@ run_mode() {
   if [[ "$mode" == "tail_blend" ]]; then
     extra_args=(
       --enable-tail-blend-preemption
-      --tail-blend-preemption-mode full
+      --tail-blend-preemption-mode "$TAIL_BLEND_PREEMPTION_MODE"
       --tail-blend-admission-mode "$TAIL_BLEND_ADMISSION_MODE"
     )
   fi
