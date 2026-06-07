@@ -794,6 +794,9 @@ class TailBlendController:
         if mode != "ttft_guarded":
             return False
 
+        if not self._is_ttft_guard_cold_request(request):
+            return False
+
         now_s = time.time()
         pressure = self._tail_blend_admission_pressure(now_s)
         if not pressure.active:
@@ -830,6 +833,8 @@ class TailBlendController:
         scheduler = self.scheduler
         if request.external_req_id is None:
             return False
+        if not self._is_ttft_guard_cold_request(request):
+            return False
 
         group_id = scheduler._taper_plus_group_id(request)
         protected_width = max(1, scheduler.tail_blend_pilot_k)
@@ -845,10 +850,15 @@ class TailBlendController:
         ):
             return False
 
-        max_running = max(1, scheduler.max_num_running_reqs)
-        running_util = len(scheduler.running) / float(max_running)
-        return running_util >= 0.50 or self._has_zero_start_waiting_group(
-            exclude_group_id=group_id
+        return self._has_zero_start_waiting_group(exclude_group_id=group_id)
+
+    @staticmethod
+    def _is_ttft_guard_cold_request(request: Request) -> bool:
+        return (
+            request.external_req_id is not None
+            and request.num_output_tokens == 0
+            and request.num_computed_tokens == 0
+            and request.num_preemptions == 0
         )
 
     def _should_preserve_prompt_locality_for_ttft_guard(
@@ -906,6 +916,14 @@ class TailBlendController:
             for group_id, state in self._groups.items()
             if state.finished_lengths
         )
+        for queue in (scheduler.waiting, scheduler.skipped_waiting):
+            for request in queue:
+                if request.external_req_id is None:
+                    continue
+                group_id = scheduler._taper_plus_group_id(request)
+                if not self._is_ttft_guard_cold_request(request):
+                    started_group_ids.add(group_id)
+                    continue
         for queue in (scheduler.waiting, scheduler.skipped_waiting):
             for request in queue:
                 if request.external_req_id is None:
@@ -1125,10 +1143,20 @@ class TailBlendController:
         running_count = sum(
             1
             for request in scheduler.running
-            if scheduler._taper_plus_group_id(request) == group_id
+            if request.external_req_id is not None
+            and scheduler._taper_plus_group_id(request) == group_id
         )
+        queued_started_count = 0
+        for queue in (scheduler.waiting, scheduler.skipped_waiting):
+            queued_started_count += sum(
+                1
+                for request in queue
+                if request.external_req_id is not None
+                and scheduler._taper_plus_group_id(request) == group_id
+                and not self._is_ttft_guard_cold_request(request)
+            )
         finished_count = len(self._groups[group_id].finished_lengths)
-        return running_count + finished_count
+        return running_count + queued_started_count + finished_count
 
     def _best_expandable_group_id(self) -> str | None:
         scheduler = self.scheduler
