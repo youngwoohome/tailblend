@@ -833,7 +833,7 @@ class TailBlendController:
         scheduler = self.scheduler
         if request.external_req_id is None:
             return False
-        if not self._is_ttft_guard_cold_request(request):
+        if self._is_ttft_guard_output_started_request(request):
             return False
 
         group_id = scheduler._taper_plus_group_id(request)
@@ -844,11 +844,6 @@ class TailBlendController:
 
         waiting_backlog = len(scheduler.waiting) + len(scheduler.skipped_waiting)
         if waiting_backlog <= 0:
-            return False
-        if self._should_preserve_prompt_locality_for_ttft_guard(
-            request,
-            waiting_backlog=waiting_backlog,
-        ):
             return False
 
         if not self._group_has_first_token_anywhere(group_id):
@@ -866,6 +861,10 @@ class TailBlendController:
             and request.num_computed_tokens == 0
             and request.num_preemptions == 0
         )
+
+    @staticmethod
+    def _is_ttft_guard_output_started_request(request: Request) -> bool:
+        return request.external_req_id is not None and request.num_output_tokens > 0
 
     def _should_preserve_prompt_locality_for_ttft_guard(
         self,
