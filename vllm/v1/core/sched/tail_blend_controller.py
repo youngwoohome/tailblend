@@ -838,7 +838,8 @@ class TailBlendController:
 
         group_id = scheduler._taper_plus_group_id(request)
         protected_width = max(1, scheduler.tail_blend_pilot_k)
-        if self._started_sibling_count(group_id) < protected_width:
+        started_siblings = self._started_sibling_count(group_id)
+        if started_siblings < protected_width:
             return False
 
         waiting_backlog = len(scheduler.waiting) + len(scheduler.skipped_waiting)
@@ -850,7 +851,12 @@ class TailBlendController:
         ):
             return False
 
-        return self._has_zero_start_waiting_group(exclude_group_id=group_id)
+        if not self._group_has_first_token_anywhere(group_id):
+            return self._has_zero_start_waiting_group(exclude_group_id=group_id)
+
+        return self._has_first_token_uncovered_waiting_group(
+            exclude_group_id=group_id
+        )
 
     @staticmethod
     def _is_ttft_guard_cold_request(request: Request) -> bool:
@@ -906,30 +912,34 @@ class TailBlendController:
 
     def _has_zero_start_waiting_group(self, exclude_group_id: str) -> bool:
         scheduler = self.scheduler
-        started_group_ids = {
-            scheduler._taper_plus_group_id(request)
-            for request in scheduler.running
-            if request.external_req_id is not None
-        }
-        started_group_ids.update(
-            group_id
-            for group_id, state in self._groups.items()
-            if state.finished_lengths
-        )
+        seen_group_ids: set[str] = set()
         for queue in (scheduler.waiting, scheduler.skipped_waiting):
             for request in queue:
                 if request.external_req_id is None:
                     continue
                 group_id = scheduler._taper_plus_group_id(request)
-                if not self._is_ttft_guard_cold_request(request):
-                    started_group_ids.add(group_id)
+                if group_id == exclude_group_id or group_id in seen_group_ids:
                     continue
+                seen_group_ids.add(group_id)
+                if not self._group_has_started_branch_anywhere(group_id):
+                    return True
+        return False
+
+    def _has_first_token_uncovered_waiting_group(
+        self,
+        exclude_group_id: str,
+    ) -> bool:
+        scheduler = self.scheduler
+        seen_group_ids: set[str] = set()
         for queue in (scheduler.waiting, scheduler.skipped_waiting):
             for request in queue:
                 if request.external_req_id is None:
                     continue
                 group_id = scheduler._taper_plus_group_id(request)
-                if group_id != exclude_group_id and group_id not in started_group_ids:
+                if group_id == exclude_group_id or group_id in seen_group_ids:
+                    continue
+                seen_group_ids.add(group_id)
+                if not self._group_has_first_token_anywhere(group_id):
                     return True
         return False
 
@@ -1036,6 +1046,45 @@ class TailBlendController:
         state = self._groups.get(group_id)
         return bool(state is not None and state.finished_lengths) or any(
             request.num_output_tokens > 0 for request in requests
+        )
+
+    def _group_has_started_branch_anywhere(self, group_id: str) -> bool:
+        scheduler = self.scheduler
+        state = self._groups.get(group_id)
+        if state is not None and state.finished_lengths:
+            return True
+        if any(
+            request.external_req_id is not None
+            and scheduler._taper_plus_group_id(request) == group_id
+            for request in scheduler.running
+        ):
+            return True
+        return any(
+            request.external_req_id is not None
+            and scheduler._taper_plus_group_id(request) == group_id
+            and not self._is_ttft_guard_cold_request(request)
+            for queue in (scheduler.waiting, scheduler.skipped_waiting)
+            for request in queue
+        )
+
+    def _group_has_first_token_anywhere(self, group_id: str) -> bool:
+        scheduler = self.scheduler
+        state = self._groups.get(group_id)
+        if state is not None and state.finished_lengths:
+            return True
+        if any(
+            request.external_req_id is not None
+            and scheduler._taper_plus_group_id(request) == group_id
+            and request.num_output_tokens > 0
+            for request in scheduler.running
+        ):
+            return True
+        return any(
+            request.external_req_id is not None
+            and scheduler._taper_plus_group_id(request) == group_id
+            and request.num_output_tokens > 0
+            for queue in (scheduler.waiting, scheduler.skipped_waiting)
+            for request in queue
         )
 
     def _ttft_guard_group_key(
